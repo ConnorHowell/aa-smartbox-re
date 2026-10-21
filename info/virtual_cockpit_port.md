@@ -148,25 +148,66 @@ Mirror omke, adapted to ARM:
 
 ---
 
-## Open questions to resolve before building the full patch
+## Open questions
 
-1. **`libAirPlay.so` display-entry API** — exact signature of
-   `AirPlayInfoArrayAddScreenDisplay` and how the main entry is constructed
-   (decompile in `libAirPlay.so`). Determines how to add the 2nd display.
-2. **Does the car's 2nd display even reach the dongle?** Confirm `HeadUnitInfo` /
-   the "Recv proxy disply count:%d" path records both displays (so you can read
-   the real cluster uuid/size at runtime instead of hardcoding). If the dongle
-   drops it on receive too, that's an extra hook.
-3. **2nd-stream key derivation** — per omke the phone→dongle 111 stream is
-   ChaCha20-Poly1305 (`DataStream-Salt`/`-Output-Encryption-Key`); the dongle→car
-   side here already uses ChaCha (`SendProxyScreenFrame`). Map the receiver-side
-   key source (`GetStreamSecurityKeys` equivalent) for the cluster connID.
-4. **Receiver frame routing** — how do decrypted 2nd-stream frames arrive?
-   (`CarPlayProxyApp::recvCarPlayVideoFrame`, `setCarPlayVideoProcessCallBack`,
-   and the single global data callback.) They must be routed to the cluster ctx,
-   not the main one.
-5. **Per-ctx send vs patch** — decide path (1) vs (2) above after reading the
-   receiver routing.
+### Closed by the follow-up RE pass
+
+1. **`libAirPlay.so` display-entry API — CLOSED.** Recovered signature
+   (`AirPlayInfoArrayAddScreenDisplay@libAirPlay.so 0x1afe8`), cross-checked
+   against the one caller in `CPAAProxyEx`:
+   ```c
+   int AirPlayInfoArrayAddScreenDisplay(
+       void **infoArray, CFStringRef uuid,
+       long features, long primaryInputDevice, long maxFPS,
+       long widthPixels, long heightPixels,
+       long widthPhysical, long heightPhysical);  // all 32-bit slots on ARM32
+   ```
+   Builds a CFDictionary (keys `uuid, features, primaryInputDevice, maxFPS,
+   widthPixels, heightPixels, widthPhysical, heightPhysical`) and
+   `CFArrayAppendValue`s it. The main caller passes `features=0xe`. So hook A
+   just calls it a second time with the cluster uuid and `1440×540`. **Done in
+   `tools/cluster-hook/libClusterHook.c`.**
+4. **Receiver frame routing — CLOSED.** Path is
+   `carplay_video_process → CarPlayProxyApp::recvCarPlayVideoFrame@0xc0928 →
+   writeCarLifeVideoFrame@0xc0450 → SendProxyScreenFrame@0xd7590`, keyed on a
+   **frame-type byte at `frame+4`** (type 7 = config →
+   `SendProxyScreenVideoConfigFrame`, else video). Everything funnels to the
+   single global screen context — there is **no stream/display index** — so a
+   cluster stream needs a separate receive/relay targeting its own context
+   (path (1) below). `setCarPlayVideoProcessCallBack` is a static/log string, not
+   a dynsym.
+
+### Still open (gate the full hook C)
+
+2. **Does the car's 2nd display reach the dongle?** Confirm `HeadUnitInfo` / the
+   "Recv proxy disply count:%d" path records both displays (to read the real
+   cluster uuid/size at runtime rather than hardcoding).
+3. **2nd-stream key derivation** — map the receiver-side key source for the
+   cluster connID (phone→dongle 111 is ChaCha20-Poly1305 per omke; dongle→car
+   already uses ChaCha in `SendProxyScreenFrame`).
+5. **Per-ctx send vs patch** — path (1) parallel context + private relay, vs (2)
+   binary-patch `SendProxyScreenFrame`/`SetupProxyScreenEx` to take a ctx. Given
+   the routing above funnels through one global with no index, **path (1)** is
+   the recommended route.
+
+## Scaffold status (`tools/cluster-hook/`)
+
+Built and validated here (static/offline — not yet run on hardware):
+
+- `libClusterHook.c` → **hook A implemented** (interpose
+  `AirPlayInfoArrayAddScreenDisplay`, append the cluster display), **hook B**
+  helper `cluster_request_ui()` present but not wired, **hook C** TODO.
+- Builds to an ARM `-nostdlib` `.so` with **no libc `DT_NEEDED`**; its 6 externs
+  all resolve in-process (musl libc, libCoreUtils, libMSNUtils, libAirPlay) —
+  verified against `app/lib` + `rootfs/lib`.
+- `inject_dt_needed.sh` uses **patchelf** to add the hook as the **first**
+  `DT_NEEDED` (verified it lands at index 0, before `libAirPlay.so`, with
+  `.text`/`.dynsym` byte-identical — LIEF was rejected for mis-ordering and
+  rewriting the ARM attributes).
+- `repack_app.sh` round-trips the app SquashFS (xz, 256 KiB) with the hook in,
+  **4.73 MB, within the 0x6c0000 budget**, and can splice it into the dump at
+  `0x7e0000`.
+- **Safety:** gated behind `CLUSTER_HOOK_ENABLE=1`; unset = stock behaviour.
 
 ## Symbol / address quick-reference (stock binary analysed)
 

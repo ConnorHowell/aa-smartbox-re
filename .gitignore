@@ -1,3 +1,7 @@
 # Extracted firmware tree — reproducible from flash_dump_fixed.bin via
 # tools/extract_partitions.sh, so it is not committed (keeps history lean).
 dumps/spi_flash/extracted/
+
+# cluster-hook build artifacts (reproducible via make / repack_app.sh)
+tools/cluster-hook/libClusterHook.so
+tools/cluster-hook/app.cluster.bin
