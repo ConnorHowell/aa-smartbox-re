@@ -1,0 +1,3 @@
+# Extracted firmware tree — reproducible from flash_dump_fixed.bin via
+# tools/extract_partitions.sh, so it is not committed (keeps history lean).
+dumps/spi_flash/extracted/
